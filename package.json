@@ -1,0 +1,22 @@
+{
+  "name": "coffee-buddy-slack",
+  "version": "1.0.0",
+  "description": "Serverless Slack app that randomly pairs channel members for weekly coffee chats.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "build": "sam build --template infra/template.yaml",
+    "deploy": "sam deploy --guided --template infra/template.yaml",
+    "invoke:pair": "aws lambda invoke --function-name coffee-buddy-pairRound --payload '{}' /dev/stdout",
+    "invoke:remind": "aws lambda invoke --function-name coffee-buddy-remind --payload '{}' /dev/stdout"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.682.0",
+    "@aws-sdk/lib-dynamodb": "^3.682.0",
+    "@aws-sdk/client-ssm": "^3.682.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,13 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "lambda:InvokeFunction",
+      "Resource": [
+        "arn:aws:lambda:ap-southeast-2:184452325148:function:coffee-buddy-pairRound",
+        "arn:aws:lambda:ap-southeast-2:184452325148:function:coffee-buddy-remind"
+      ]
+    }
+  ]
+}

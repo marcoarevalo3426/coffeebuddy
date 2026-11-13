@@ -1,0 +1,245 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Coffee Buddy - serverless Slack app (native CloudFormation, no SAM transform).
+  Pairs #team-eternals-bau-au-engineers members for weekly coffee chats.
+  Runs twice a week via EventBridge Scheduler. No always-on compute.
+
+Parameters:
+  CodeBucket:
+    Type: String
+    Description: S3 bucket holding the Lambda deployment zip.
+  CodeKey:
+    Type: String
+    Default: coffee-buddy.zip
+    Description: S3 key of the Lambda deployment zip.
+  SlackChannel:
+    Type: String
+    Default: my-amazing-team
+  AllowedTeamDomain:
+    Type: String
+    Default: anchortagworkspace
+  Timezone:
+    Type: String
+    Default: Pacific/Auckland
+  FeedbackUserId:
+    Type: String
+    Default: ""
+    Description: Slack user ID that receives feedback DMs (the app owner).
+
+Resources:
+  # ----- DynamoDB: round history (on-demand) -----
+  HistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coffee-buddy-history
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ----- Lambda execution role -----
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: coffee-buddy-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: coffee-buddy-permissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+              - Sid: DynamoDB
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource: !GetAtt HistoryTable.Arn
+              - Sid: SlackSecrets
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/coffee-buddy/slack-bot-token
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/coffee-buddy/slack-signing-secret
+
+  # ----- Lambda functions -----
+  PairRoundFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: coffee-buddy-pairRound
+      Runtime: nodejs20.x
+      Architectures: [arm64]
+      Handler: src/handlers/pairRound.handler
+      Role: !GetAtt LambdaRole.Arn
+      MemorySize: 256
+      Timeout: 120
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          SLACK_CHANNEL: !Ref SlackChannel
+          ALLOWED_TEAM_DOMAIN: !Ref AllowedTeamDomain
+          SLACK_TOKEN_PARAM: /coffee-buddy/slack-bot-token
+          HISTORY_TABLE: !Ref HistoryTable
+
+  RemindFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: coffee-buddy-remind
+      Runtime: nodejs20.x
+      Architectures: [arm64]
+      Handler: src/handlers/remind.handler
+      Role: !GetAtt LambdaRole.Arn
+      MemorySize: 256
+      Timeout: 120
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          SLACK_CHANNEL: !Ref SlackChannel
+          ALLOWED_TEAM_DOMAIN: !Ref AllowedTeamDomain
+          SLACK_TOKEN_PARAM: /coffee-buddy/slack-bot-token
+          HISTORY_TABLE: !Ref HistoryTable
+
+  # ----- Interactivity function (fronted by a Function URL) -----
+  InteractionsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: coffee-buddy-interactions
+      Runtime: nodejs20.x
+      Architectures: [arm64]
+      Handler: src/handlers/interactions.handler
+      Role: !GetAtt LambdaRole.Arn
+      MemorySize: 256
+      Timeout: 10
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          SLACK_TOKEN_PARAM: /coffee-buddy/slack-bot-token
+          SLACK_SIGNING_SECRET_PARAM: /coffee-buddy/slack-signing-secret
+          FEEDBACK_USER_ID: !Ref FeedbackUserId
+
+  # Public HTTPS endpoint Slack posts interactions to, via API Gateway HTTP API.
+  # Requests are authenticated by Slack's signature (verified in the handler),
+  # so the route itself is open (no IAM/JWT authorizer).
+  InteractionsApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: coffee-buddy-interactions
+      ProtocolType: HTTP
+
+  InteractionsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref InteractionsApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt InteractionsFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  InteractionsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref InteractionsApi
+      RouteKey: POST /slack/interactions
+      Target: !Sub integrations/${InteractionsIntegration}
+
+  InteractionsStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref InteractionsApi
+      StageName: $default
+      AutoDeploy: true
+
+  InteractionsApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InteractionsFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${InteractionsApi}/*/*/slack/interactions
+
+  # ----- EventBridge Scheduler role -----
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: coffee-buddy-scheduler-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: coffee-buddy-scheduler-invoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt PairRoundFunction.Arn
+                  - !GetAtt RemindFunction.Arn
+
+  # ----- Schedules -----
+  SundayPairSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: coffee-buddy-sunday-0900
+      Description: Build pairings and announce - Sundays at 09:00.
+      ScheduleExpression: cron(0 9 ? * SUN *)
+      ScheduleExpressionTimezone: !Ref Timezone
+      FlexibleTimeWindow: { Mode: "OFF" }
+      Target:
+        Arn: !GetAtt PairRoundFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+
+  TuesdayRemindSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: coffee-buddy-tuesday-0900
+      Description: Remind this week's pairs - Tuesdays at 09:00.
+      ScheduleExpression: cron(0 9 ? * TUE *)
+      ScheduleExpressionTimezone: !Ref Timezone
+      FlexibleTimeWindow: { Mode: "OFF" }
+      Target:
+        Arn: !GetAtt RemindFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+
+Outputs:
+  PairRoundFunction:
+    Value: !Ref PairRoundFunction
+  RemindFunction:
+    Value: !Ref RemindFunction
+  InteractionsFunction:
+    Value: !Ref InteractionsFunction
+  InteractionsUrl:
+    Description: Set this as the Slack app's Interactivity Request URL.
+    Value: !Sub https://${InteractionsApi}.execute-api.${AWS::Region}.amazonaws.com/slack/interactions
+  HistoryTable:
+    Value: !Ref HistoryTable

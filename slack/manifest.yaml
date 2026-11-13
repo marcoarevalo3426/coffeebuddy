@@ -1,0 +1,43 @@
+# Coffee Buddy — Slack App Manifest
+# ----------------------------------
+# FASTEST WAY TO INSTALL:
+#   1. Go to https://api.slack.com/apps  ->  "Create New App"  ->  "From a manifest"
+#   2. Pick the Gentrack workspace (gentrack.slack.com).
+#   3. Paste this file, review, and Create.
+#   4. Click "Install to Workspace" and approve the scopes.
+#   5. Copy the "Bot User OAuth Token" (starts with xoxb-) into SSM (see docs/INSTALL.md).
+#   6. Invite the bot to the channel:  /invite @Coffee Buddy  in #team-eternals-bau-au-engineers
+#
+# This app has no public install flow — it's a single-workspace internal app,
+# which is the cheapest and fastest route for a one-org tool.
+
+display_information:
+  name: Coffee Buddy
+  description: Randomly pairs teammates for a weekly coffee chat.
+  background_color: "#6f4e37"
+  long_description: >
+    Coffee Buddy randomly pairs members of #team-eternals-bau-au-engineers into
+    groups of two (or a trio when the count is odd) every Sunday, announces the
+    round in the channel, DMs each group to kick things off, and nudges everyone
+    again on Tuesday. Built for Gentrack.
+
+features:
+  bot_user:
+    display_name: Coffee Buddy
+    always_online: true
+
+oauth_config:
+  scopes:
+    bot:
+      - channels:read        # list public channels + read membership
+      - groups:read          # same, for private channels
+      - users:read           # resolve member display names, skip bots
+      - chat:write           # post the announcement + DMs
+      - mpim:write           # open multi-person DMs (group chats)
+      - im:write             # open direct messages
+      - team:read            # verify the workspace is Gentrack
+
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

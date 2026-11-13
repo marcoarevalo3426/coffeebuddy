@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Coffee Buddy — serverless Slack app that pairs #team-eternals-bau-au-engineers
+  members for weekly coffee chats. Runs twice a week via EventBridge Scheduler.
+  No always-on compute (no EC2): pay-per-use Lambda + on-demand DynamoDB.
+
+Parameters:
+  SlackChannel:
+    Type: String
+    Default: my-amazing-team
+    Description: Channel name (without the leading #).
+  SlackChannelId:
+    Type: String
+    Default: ""
+    Description: Optional channel ID (C0XXXX...). If set, skips a name lookup.
+  AllowedTeamDomain:
+    Type: String
+    Default: anchortagworkspace
+    Description: Slack workspace domain this app is locked to.
+  Timezone:
+    Type: String
+    Default: Pacific/Auckland
+    Description: IANA timezone for the schedules.
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures: [arm64]      # Graviton: cheaper + faster for this workload
+    MemorySize: 256
+    Timeout: 120
+    Environment:
+      Variables:
+        SLACK_CHANNEL: !Ref SlackChannel
+        SLACK_CHANNEL_ID: !Ref SlackChannelId
+        ALLOWED_TEAM_DOMAIN: !Ref AllowedTeamDomain
+        SLACK_TOKEN_PARAM: /coffee-buddy/slack-bot-token
+        HISTORY_TABLE: !Ref HistoryTable
+
+Resources:
+  # ----- Secret storage for the Slack bot token -----
+  # NOTE: SecureString SSM params can't be created by plain CloudFormation.
+  #       Create it once via the CLI (see docs/INSTALL.md); this template only
+  #       grants read access to it.
+
+  # ----- DynamoDB: round history (on-demand = no idle cost) -----
+  HistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coffee-buddy-history
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ----- Shared IAM policy fragment for the two functions -----
+  PairRoundFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: coffee-buddy-pairRound
+      Handler: src/handlers/pairRound.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HistoryTable
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/coffee-buddy/slack-bot-token
+
+  RemindFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: coffee-buddy-remind
+      Handler: src/handlers/remind.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HistoryTable
+        - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/coffee-buddy/slack-bot-token
+
+  # ----- EventBridge Scheduler: the "only runs twice a week" part -----
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-coffee-lambdas
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt PairRoundFunction.Arn
+                  - !GetAtt RemindFunction.Arn
+
+  SundayPairSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: coffee-buddy-sunday-0900
+      Description: Build pairings and announce — Sundays at 09:00.
+      ScheduleExpression: cron(0 9 ? * SUN *)
+      ScheduleExpressionTimezone: !Ref Timezone
+      FlexibleTimeWindow: { Mode: "OFF" }
+      Target:
+        Arn: !GetAtt PairRoundFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+
+  TuesdayRemindSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: coffee-buddy-tuesday-0900
+      Description: Remind this week's pairs — Tuesdays at 09:00.
+      ScheduleExpression: cron(0 9 ? * TUE *)
+      ScheduleExpressionTimezone: !Ref Timezone
+      FlexibleTimeWindow: { Mode: "OFF" }
+      Target:
+        Arn: !GetAtt RemindFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+
+Outputs:
+  PairRoundFunction:
+    Value: !Ref PairRoundFunction
+  RemindFunction:
+    Value: !Ref RemindFunction
+  HistoryTable:
+    Value: !Ref HistoryTable
