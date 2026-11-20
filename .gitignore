@@ -5,3 +5,17 @@ samconfig.toml
 .DS_Store
 .env
 coffee-buddy.zip
+
+# Never commit keys or credentials
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.pub
+eval *
+.env.*
+credentials*
+.aws/
