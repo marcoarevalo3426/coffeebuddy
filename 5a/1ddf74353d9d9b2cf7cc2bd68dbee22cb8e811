@@ -1,0 +1,14 @@
+.gitignore
+  h_fc43b80cbcd575 8-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5a1ddf74353d9d9b2cf7cc2bd68dbee22cb8e811",
+  "prompts": {},
+  "humans": {
+    "h_fc43b80cbcd575": {
+      "author": "marcoarevalo <marco.arevalo3426@gmail.com>"
+    }
+  }
+}
